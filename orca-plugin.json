@@ -1,0 +1,55 @@
+{
+  "manifestVersion": 2,
+  "id": "orca-git-graph",
+  "name": "Orca Git Graph",
+  "version": "0.1.0",
+  "description": "Git Graph in an Orca editor tab (personal use).",
+  "icon": "icons/git-graph.png",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "customEditors": [
+      {
+        "id": "git-graph-editor",
+        "title": "Git Graph",
+        "extensions": [
+          ".gitgraph"
+        ],
+        "entry": "editor/index.html",
+        "priority": "default",
+        "icon": "icons/git-graph.png"
+      }
+    ],
+    "newFiles": [
+      {
+        "id": "git-graph-new-file",
+        "title": "Git Graph",
+        "extension": ".gitgraph",
+        "icon": "icons/git-graph.png"
+      }
+    ],
+    "events": [
+      {
+        "on": "workspace.changed"
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "storage:own"
+    },
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "workspace:write"
+    },
+    {
+      "kind": "notifications:show"
+    }
+  ]
+}

@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<link rel="stylesheet" type="text/css" href="out.min.css">
+	<title>Git Graph</title>
+	<style>
+		:root {
+			--vscode-foreground: var(--orca-foreground, #f4f4f5);
+			--vscode-editor-background: var(--orca-background, #18181b);
+			--vscode-editor-foreground: var(--orca-foreground, #f4f4f5);
+			--vscode-editorWidget-background: var(--orca-card, #27272a);
+			--vscode-editorSuggestWidget-foreground: var(--orca-foreground, #f4f4f5);
+			--vscode-editor-findMatchHighlightBorder: var(--orca-ring, #a1a1aa);
+			--vscode-editor-findMatchHighlightBackground: rgba(255, 255, 255, 0.1);
+			--vscode-editor-font-family: var(--vscode-font-family);
+			--vscode-focusBorder: var(--orca-ring, #6366f1);
+			--vscode-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+			--vscode-gitDecoration-addedResourceForeground: #4ade80;
+			--vscode-gitDecoration-deletedResourceForeground: #f87171;
+			--vscode-gitDecoration-modifiedResourceForeground: #fbbf24;
+			--vscode-input-background: var(--orca-card, #27272a);
+			--vscode-input-foreground: var(--orca-foreground, #f4f4f5);
+			--vscode-input-placeholderForeground: var(--orca-muted-foreground, #71717a);
+			--vscode-inputOption-activeBackground: var(--orca-accent, #3f3f46);
+			--vscode-inputOption-activeBorder: var(--orca-ring, #6366f1);
+			--vscode-inputValidation-errorBackground: var(--orca-destructive, #7f1d1d);
+			--vscode-inputValidation-errorBorder: var(--orca-destructive, #ef4444);
+			--vscode-menu-background: var(--orca-popover, #27272a);
+			--vscode-menu-border: var(--orca-border, #3f3f46);
+			--vscode-menu-foreground: var(--orca-popover-foreground, #f4f4f5);
+			--vscode-menu-selectionBackground: var(--orca-accent, #3f3f46);
+			--vscode-menu-selectionBorder: var(--orca-border, #3f3f46);
+			--vscode-menu-selectionForeground: var(--orca-accent-foreground, #f4f4f5);
+			--vscode-menu-separatorBackground: var(--orca-border, #3f3f46);
+			--vscode-scrollbar-shadow: rgba(0, 0, 0, 0.2);
+			--vscode-selection-background: var(--orca-accent, #3f3f46);
+			--vscode-textLink-activeForeground: var(--orca-primary, #6366f1);
+			--vscode-textLink-foreground: var(--orca-primary, #6366f1);
+			--vscode-widget-shadow: rgba(0, 0, 0, 0.3);
+
+			--git-graph-color0: #0085d9;
+			--git-graph-color1: #d9008f;
+			--git-graph-color2: #00d90a;
+			--git-graph-color3: #d98500;
+			--git-graph-color4: #a300d9;
+			--git-graph-color5: #ff0000;
+			--git-graph-color6: #00d9cc;
+			--git-graph-color7: #e138e8;
+			--git-graph-color8: #85d900;
+			--git-graph-color9: #dc5b23;
+			--git-graph-color10: #6f24d6;
+			--git-graph-color11: #ffcc00;
+		}
+		body {
+			color: var(--orca-foreground, #f4f4f5);
+			background-color: var(--orca-background, #18181b);
+			font-family: var(--vscode-font-family);
+		}
+		[data-color="0"]{--git-graph-color:var(--git-graph-color0);}
+		[data-color="1"]{--git-graph-color:var(--git-graph-color1);}
+		[data-color="2"]{--git-graph-color:var(--git-graph-color2);}
+		[data-color="3"]{--git-graph-color:var(--git-graph-color3);}
+		[data-color="4"]{--git-graph-color:var(--git-graph-color4);}
+		[data-color="5"]{--git-graph-color:var(--git-graph-color5);}
+		[data-color="6"]{--git-graph-color:var(--git-graph-color6);}
+		[data-color="7"]{--git-graph-color:var(--git-graph-color7);}
+		[data-color="8"]{--git-graph-color:var(--git-graph-color8);}
+		[data-color="9"]{--git-graph-color:var(--git-graph-color9);}
+		[data-color="10"]{--git-graph-color:var(--git-graph-color10);}
+		[data-color="11"]{--git-graph-color:var(--git-graph-color11);}
+	</style>
+</head>
+<body>
+	<div id="view" tabindex="-1">
+		<div id="controls">
+			<span id="repoControl"><span class="unselectable">Repo: </span><div id="repoDropdown" class="dropdown"></div></span>
+			<span id="branchControl"><span class="unselectable">Branches: </span><div id="branchDropdown" class="dropdown"></div></span>
+			<label id="showRemoteBranchesControl"><input type="checkbox" id="showRemoteBranchesCheckbox" tabindex="-1"><span class="customCheckbox"></span>Show Remote Branches</label>
+			<div id="findBtn" title="Find"></div>
+			<div id="terminalBtn" title="Open a Terminal for this Repository"></div>
+			<div id="settingsBtn" title="Repository Settings"></div>
+			<div id="fetchBtn"></div>
+			<div id="refreshBtn"></div>
+		</div>
+		<div id="content">
+			<div id="commitGraph"></div>
+			<div id="commitTable"></div>
+		</div>
+		<div id="footer"></div>
+	</div>
+	<div id="scrollShadow"></div>
+	<script>
+	(function() {
+		let _state = null;
+		try {
+			_state = JSON.parse(localStorage.getItem('git-graph-vscode-state') || 'null');
+		} catch (e) {}
+
+		window.acquireVsCodeApi = function() {
+			return {
+				postMessage: function(msg) {
+					if (window.orca && window.orca.plugin && typeof window.orca.plugin.request === 'function') {
+						window.orca.plugin.request('msg', msg).then(dispatchMsg).catch(function(err) {
+							console.error('[git-graph] plugin.request error:', err);
+						});
+					} else if (window.orca && window.orca.host && typeof window.orca.host.call === 'function') {
+						window.orca.host.call('plugin.request', { name: 'msg', input: msg }).then(dispatchMsg).catch(function(err) {
+							console.error('[git-graph] host.call error:', err);
+						});
+					}
+				},
+				getState: function() {
+					return _state;
+				},
+				setState: function(state) {
+					_state = state;
+					try {
+						localStorage.setItem('git-graph-vscode-state', JSON.stringify(state));
+					} catch (e) {}
+				}
+			};
+		};
+
+		var lastHandled = '';
+		function dispatchMsg(data) {
+			if (!data) return;
+			if (data.command === 'reload') {
+				location.reload();
+				return;
+			}
+			if (document.getElementById('notGitRepo') && data && data.command === 'loadRepos' && data.repos && Object.keys(data.repos).length > 0) {
+				location.reload();
+				return;
+			}
+			var key = data.command + ':' + (data.refreshId !== undefined ? data.refreshId : '') + ':' + (data.repo || '') + ':' + (data.commitHash || '');
+			if (key === lastHandled) return;
+			lastHandled = key;
+			setTimeout(function() { if (lastHandled === key) lastHandled = ''; }, 200);
+			window.dispatchEvent(new MessageEvent('message', { data: data }));
+		}
+
+		if (window.orca && window.orca.plugin && typeof window.orca.plugin.on === 'function') {
+			window.orca.plugin.on('msg', dispatchMsg);
+		}
+
+		const defaultInitialState = {
+			config: {
+				commitDetailsView: { autoCenter: true, fileTreeCompactFolders: true, fileViewType: 1, location: 0 },
+				commitOrdering: "date",
+				contextMenuActionsVisibility: {
+					branch: { checkout: true, rename: true, delete: true, merge: true, rebase: true, push: true, createPullRequest: true, createArchive: true, selectInBranchesDropdown: true, unselectInBranchesDropdown: true, copyName: true },
+					commit: { addTag: true, createBranch: true, checkout: true, cherrypick: true, revert: true, drop: true, merge: true, rebase: true, reset: true, copyHash: true, copySubject: true },
+					remoteBranch: { checkout: true, delete: true, fetch: true, merge: true, pull: true, createPullRequest: true, createArchive: true, selectInBranchesDropdown: true, unselectInBranchesDropdown: true, copyName: true },
+					stash: { apply: true, createBranch: true, pop: true, drop: true, copyName: true, copyHash: true },
+					tag: { viewDetails: true, delete: true, push: true, createArchive: true, copyName: true },
+					uncommittedChanges: { stash: true, reset: true, clean: true, openSourceControlView: true }
+				},
+				customBranchGlobPatterns: [],
+				customEmojiShortcodeMappings: [],
+				customPullRequestProviders: [],
+				dateFormat: { type: 0, iso: false },
+				defaultColumnVisibility: { author: true, commit: true, date: true },
+				dialogDefaults: {
+					addTag: { pushToRemote: false, type: 0 },
+					applyStash: { reinstateIndex: false },
+					cherryPick: { noCommit: false, recordOrigin: false },
+					createBranch: { checkout: false },
+					deleteBranch: { forceDelete: false },
+					fetchIntoLocalBranch: { forceFetch: false },
+					fetchRemote: { prune: false, pruneTags: false },
+					general: { referenceInputSpaceSubstitution: null },
+					merge: { noCommit: false, noFastForward: true, squash: false },
+					popStash: { reinstateIndex: false },
+					pullBranch: { noFastForward: false, squash: false },
+					rebase: { ignoreDate: true, interactive: false },
+					resetCommit: { mode: "mixed" },
+					resetUncommitted: { mode: "mixed" },
+					stashUncommittedChanges: { includeUntracked: true }
+				},
+				enhancedAccessibility: false,
+				fetchAndPrune: false,
+				fetchAndPruneTags: false,
+				fetchAvatars: false,
+				graph: {
+					colours: ["#0085d9", "#d9008f", "#00d90a", "#d98500", "#a300d9", "#ff0000", "#00d9cc", "#e138e8", "#85d900", "#dc5b23", "#6f24d6", "#ffcc00"],
+					style: 0,
+					grid: { x: 16, y: 24, offsetX: 16, offsetY: 12, expandY: 250 },
+					uncommittedChanges: 0
+				},
+				includeCommitsMentionedByReflogs: false,
+				initialLoadCommits: 300,
+				keybindings: { find: "f", refresh: "r", scrollToHead: "h", scrollToStash: "s" },
+				loadMoreCommits: 100,
+				loadMoreCommitsAutomatically: true,
+				markdown: true,
+				mute: { commitsNotAncestorsOfHead: false, mergeCommits: true },
+				onlyFollowFirstParent: false,
+				onRepoLoad: { scrollToHead: false, showCheckedOutBranch: false, showSpecificBranches: [] },
+				referenceLabels: { branchLabelsAlignedToGraph: false, combineLocalAndRemoteBranchLabels: true, tagLabelsOnRight: false },
+				repoDropdownOrder: 2,
+				showRemoteBranches: true,
+				showStashes: true,
+				showTags: true
+			},
+			lastActiveRepo: null,
+			loadViewTo: null,
+			repos: {},
+			loadRepoInfoRefreshId: 0,
+			loadCommitsRefreshId: 0
+		};
+
+		async function start() {
+			let res = null;
+			try {
+				if (window.orca && window.orca.plugin && typeof window.orca.plugin.request === 'function') {
+					res = await window.orca.plugin.request('getInitialState', {});
+				} else if (window.orca && window.orca.host && typeof window.orca.host.call === 'function') {
+					res = await window.orca.host.call('plugin.request', { name: 'getInitialState', input: {} });
+				}
+			} catch (e) {
+				console.warn('[git-graph] Error fetching initial state from worker:', e);
+			}
+
+			if (res && res.error) {
+				if (window.orca && window.orca.document && typeof window.orca.document.get === 'function') {
+					try { window.orca.document.get(); } catch (e) {}
+				}
+				var view = document.getElementById('view');
+				if (view) view.style.display = 'none';
+				var existing = document.getElementById('notGitRepo');
+				if (existing) existing.remove();
+
+				var msg = document.createElement('div');
+				msg.id = 'notGitRepo';
+				msg.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;text-align:center;padding:24px;box-sizing:border-box;color:var(--orca-foreground,#f4f4f5);font-family:var(--vscode-font-family);';
+				msg.innerHTML = '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.4;margin-bottom:12px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' +
+					'<h2 style="margin:0 0 8px 0;font-size:16px;font-weight:600;">' + (res.error || '当前 workspace 不是 Git 仓库') + '</h2>' +
+					'<p style="margin:0;font-size:13px;opacity:0.65;line-height:1.5;">请切换到包含 Git 仓库的 workspace，或在当前目录初始化 Git 仓库。</p>';
+				document.body.appendChild(msg);
+				return;
+			}
+
+			window.initialState = (res && res.initialState) || defaultInitialState;
+			window.globalState = (res && res.globalState) || { alwaysAcceptCheckoutCommit: false, issueLinkingConfig: null };
+			window.workspaceState = (res && res.workspaceState) || { findIsCaseSensitive: false, findIsRegex: false, findOpenCommitDetailsView: false };
+
+			var script = document.createElement('script');
+			script.src = 'out.min.js';
+			script.onload = function() {
+				window.dispatchEvent(new Event('load'));
+				if (window.orca && window.orca.document) {
+					try {
+						if (typeof window.orca.document.get === 'function') {
+							window.orca.document.get();
+						}
+						if (typeof window.orca.document.session === 'function') {
+							window.orca.document.session({
+								decode: function(c) { return (c && c.text) || ''; },
+								encode: function(s) { return { kind: 'text', text: s || '' }; }
+							});
+						}
+					} catch (e) {
+						console.warn('[git-graph] editor document error:', e);
+					}
+				}
+			};
+			document.body.appendChild(script);
+		}
+
+		start();
+	})();
+	</script>
+</body>
+</html>
