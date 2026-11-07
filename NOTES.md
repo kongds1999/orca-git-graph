@@ -42,6 +42,14 @@
 - **版权合规与剥离 vendor/**：将原版 `vendor/LICENSE` 拷贝保留至 `editor/LICENSE-git-graph`，彻底删除开发期参考的 `vendor/` 目录。
 - **过程文件清理**：清理所有临时日志（`agy-run*.log`, `watch.log`）及过程规划文档（`BRIEF.md`, `FIX1.md`, `PHASE2.md`, `PHASE3.md`, `CLEANUP.md`）。
 
+### 阶段六：Git 操作逻辑精细化修复与状态持久化 (Logic Fixes & Persistence)
+- **暂存区判断修复**：`areStagedChanges` 补充 `--cached` 参数与空分支/SHA-256 仓库（`git diff --cached --name-only`）兜底，避免将未暂存的工作区改动误判为暂存变动，同时兼容 SHA-1 与 SHA-256 初始空分支。
+- **远程编辑功能补全**：实现 `editRemote`，支持远程重命名（`git remote rename`）、抓取地址变更（`set-url`）及推送地址增删改（`--push --add` / `--push` / `--push --delete`），包含远程名称前后端防御性校验及 `--unset-all` 兜底。
+- **用户配置操作闭环**：完整实现 `editUserDetails` 与 `deleteUserDetails`，响应结构严格对齐前端 `errors: [null, ...]` 期望格式；针对 `git config --unset` 返回 code 5（配置键不存在）进行静默容错（视为成功返回 null），避免弹窗报错并保证配置自动重载。
+- **国际化环境隔离**：所有 Git 子进程执行注入 `LC_ALL: 'en_US.UTF-8'`、`LANG: 'en_US.UTF-8'` 与 `LANGUAGE: 'en_US.UTF-8'`，避免非英文 locale 下解析与正则匹配异常。
+- **贮藏选择器修正**：`gitFormatStash` 由 `%gD`（`refs/stash@{0}`）修正为 `%gd`（`stash@{0}`），保证与前端贮藏选择器及 Git 交互契约一致。
+- **仓库与视图配置状态持久化**：接入 `orca.storage`，使 `setRepoState`（CDV 高度/分隔栏比例、列宽与隐藏远端等）、`globalViewState` 以及 `workspaceViewState` 在热重载及多会话间完整持久化与无缝恢复。
+
 ---
 
 ## 2. 核心架构与功能清单
@@ -99,7 +107,7 @@
    - 未新增额外 capability（如 clipboard），使用原生 pbcopy 管道支持剪贴板辅助功能。
 
 6. **测试与质量保障**
-   - 12 项自动化单元测试（位于 `src/worker.test.ts`），利用 `os.tmpdir()` 临时仓库完整覆盖上述各类写操作及输入防御校验，测试全部通过（`orca plugin test .` exit 0）。
+   - 17 项自动化单元测试（位于 `src/worker.test.ts`），利用 `os.tmpdir()` 临时仓库完整覆盖上述各类写操作及输入防御校验，测试全部通过（`orca plugin test .` exit 0）。
    - 静态检查 `orca plugin validate . --json` 与 `orca plugin check . --json` 均顺利通过，无 error / warning。
 
 ---

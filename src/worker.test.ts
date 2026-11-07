@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { assert, mockHost, mountWorker, test } from 'orca/testing';
+import { DataSource } from './dataSource.ts';
 import * as main from './worker.ts';
 
 test('answers getInitialState with repository and default configuration', async () => {
@@ -842,4 +843,336 @@ test('persists alwaysAcceptCheckoutCommit via setGlobalViewState', async () => {
   assert.equal(state.globalState.alwaysAcceptCheckoutCommit, true);
 
   await worker.deactivate();
+});
+
+test('areStagedChanges correctly identifies staged vs unstaged modifications', async () => {
+  const { repoPath, cleanup } = initTestRepo();
+  try {
+    const ds = new DataSource();
+    // 1. Clean repo has no staged changes
+    assert.equal(await ds.areStagedChanges(repoPath), false);
+
+    // 2. Unstaged modification must NOT be treated as staged
+    fs.writeFileSync(path.join(repoPath, 'initial.txt'), 'unstaged change\n');
+    assert.equal(await ds.areStagedChanges(repoPath), false);
+
+    // 3. Staged modification must be detected
+    cp.execFileSync('git', ['add', '.'], { cwd: repoPath });
+    assert.equal(await ds.areStagedChanges(repoPath), true);
+
+    // 4. Unborn empty repo and staged files
+    const unbornPath = fs.mkdtempSync(path.join(os.tmpdir(), 'git-unborn-'));
+    try {
+      cp.execFileSync('git', ['init'], { cwd: unbornPath });
+      assert.equal(await ds.areStagedChanges(unbornPath), false);
+
+      fs.writeFileSync(path.join(unbornPath, 'file.txt'), 'content\n');
+      assert.equal(await ds.areStagedChanges(unbornPath), false);
+
+      cp.execFileSync('git', ['add', '.'], { cwd: unbornPath });
+      assert.equal(await ds.areStagedChanges(unbornPath), true);
+    } finally {
+      fs.rmSync(unbornPath, { recursive: true, force: true });
+    }
+
+    // 5. SHA-256 repo with unborn branch
+    const sha256Path = fs.mkdtempSync(path.join(os.tmpdir(), 'git-sha256-'));
+    try {
+      cp.execFileSync('git', ['init', '--object-format=sha256'], { cwd: sha256Path });
+      assert.equal(await ds.areStagedChanges(sha256Path), false);
+
+      fs.writeFileSync(path.join(sha256Path, 'sha256.txt'), 'sha256 content\n');
+      assert.equal(await ds.areStagedChanges(sha256Path), false);
+
+      cp.execFileSync('git', ['add', '.'], { cwd: sha256Path });
+      assert.equal(await ds.areStagedChanges(sha256Path), true);
+    } finally {
+      fs.rmSync(sha256Path, { recursive: true, force: true });
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('handles editRemote operations (rename, set fetch url, set/delete push url)', async () => {
+  const { repoPath, cleanup } = initTestRepo();
+  try {
+    cp.execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/foo/origin.git'], { cwd: repoPath });
+
+    const host = mockHost({
+      capabilities: ['workspace:read', 'workspace:write', 'storage:own', 'notifications:show'],
+      results: {
+        'workspace.list': {
+          workspaces: [{ id: 'ws-1', kind: 'worktree', name: 'test-repo', path: repoPath, branch: 'main', hostId: null }],
+          truncated: false
+        },
+        'workspace.readContext': { branch: 'main', displayName: 'test-repo', terminals: [] }
+      }
+    });
+
+    const worker = await mountWorker(main, { host });
+
+    // 1. Validation failure for invalid new remote name
+    const invalidRes: any = await worker.request('msg', {
+      command: 'editRemote',
+      repo: repoPath,
+      nameOld: 'origin',
+      nameNew: '-invalid',
+      urlOld: 'https://github.com/foo/origin.git',
+      urlNew: 'https://github.com/foo/origin.git',
+      pushUrlOld: null,
+      pushUrlNew: null
+    });
+    assert.equal(invalidRes.command, 'editRemote');
+    assert.ok(invalidRes.error && invalidRes.error.includes('cannot start with "-"'));
+
+    // 1b. Validation failure for empty remote name
+    const emptyRes: any = await worker.request('msg', {
+      command: 'editRemote',
+      repo: repoPath,
+      nameOld: 'origin',
+      nameNew: '   ',
+      urlOld: 'https://github.com/foo/origin.git',
+      urlNew: 'https://github.com/foo/origin.git',
+      pushUrlOld: null,
+      pushUrlNew: null
+    });
+    assert.equal(emptyRes.command, 'editRemote');
+    assert.equal(emptyRes.error, 'Remote name cannot be empty');
+
+    // 2. Rename origin -> upstream and update fetch URL and add push URL
+    const editRes: any = await worker.request('msg', {
+      command: 'editRemote',
+      repo: repoPath,
+      nameOld: 'origin',
+      nameNew: 'upstream',
+      urlOld: 'https://github.com/foo/origin.git',
+      urlNew: 'https://github.com/foo/upstream.git',
+      pushUrlOld: null,
+      pushUrlNew: 'https://github.com/foo/upstream-push.git'
+    });
+    assert.equal(editRes.command, 'editRemote');
+    assert.equal(editRes.error, null);
+
+    let remotesVerbose = cp.execFileSync('git', ['remote', '-v'], { cwd: repoPath }).toString();
+    assert.ok(remotesVerbose.includes('upstream\thttps://github.com/foo/upstream.git (fetch)'));
+    assert.ok(remotesVerbose.includes('upstream\thttps://github.com/foo/upstream-push.git (push)'));
+
+    // 3. Update existing push URL
+    const updatePushRes: any = await worker.request('msg', {
+      command: 'editRemote',
+      repo: repoPath,
+      nameOld: 'upstream',
+      nameNew: 'upstream',
+      urlOld: 'https://github.com/foo/upstream.git',
+      urlNew: 'https://github.com/foo/upstream.git',
+      pushUrlOld: 'https://github.com/foo/upstream-push.git',
+      pushUrlNew: 'https://github.com/foo/upstream-push2.git'
+    });
+    assert.equal(updatePushRes.command, 'editRemote');
+    assert.equal(updatePushRes.error, null);
+    remotesVerbose = cp.execFileSync('git', ['remote', '-v'], { cwd: repoPath }).toString();
+    assert.ok(remotesVerbose.includes('upstream\thttps://github.com/foo/upstream-push2.git (push)'));
+
+    // 4. Delete push URL
+    const deletePushRes: any = await worker.request('msg', {
+      command: 'editRemote',
+      repo: repoPath,
+      nameOld: 'upstream',
+      nameNew: 'upstream',
+      urlOld: 'https://github.com/foo/upstream.git',
+      urlNew: 'https://github.com/foo/upstream.git',
+      pushUrlOld: 'https://github.com/foo/upstream-push2.git',
+      pushUrlNew: null
+    });
+    assert.equal(deletePushRes.command, 'editRemote');
+    assert.equal(deletePushRes.error, null);
+    remotesVerbose = cp.execFileSync('git', ['remote', '-v'], { cwd: repoPath }).toString();
+    assert.ok(!remotesVerbose.includes('upstream-push2'));
+
+    await worker.deactivate();
+  } finally {
+    cleanup();
+  }
+});
+
+test('handles editUserDetails and deleteUserDetails with frontend expected response', async () => {
+  const { repoPath, cleanup } = initTestRepo();
+  try {
+    const host = mockHost({
+      capabilities: ['workspace:read', 'workspace:write', 'storage:own', 'notifications:show'],
+      results: {
+        'workspace.list': {
+          workspaces: [{ id: 'ws-1', kind: 'worktree', name: 'test-repo', path: repoPath, branch: 'main', hostId: null }],
+          truncated: false
+        },
+        'workspace.readContext': { branch: 'main', displayName: 'test-repo', terminals: [] }
+      }
+    });
+
+    const worker = await mountWorker(main, { host });
+
+    // 1. Set local user details
+    const editLocalRes: any = await worker.request('msg', {
+      command: 'editUserDetails',
+      repo: repoPath,
+      name: 'Custom User',
+      email: 'custom@example.com',
+      location: 'local',
+      deleteLocalName: false,
+      deleteLocalEmail: false
+    });
+    assert.equal(editLocalRes.command, 'editUserDetails');
+    assert.deepEqual(editLocalRes.errors, [null, null]);
+
+    assert.equal(cp.execFileSync('git', ['config', '--local', 'user.name'], { cwd: repoPath }).toString().trim(), 'Custom User');
+    assert.equal(cp.execFileSync('git', ['config', '--local', 'user.email'], { cwd: repoPath }).toString().trim(), 'custom@example.com');
+
+    // 2. Delete user details
+    const deleteRes: any = await worker.request('msg', {
+      command: 'deleteUserDetails',
+      repo: repoPath,
+      name: true,
+      email: true,
+      location: 'local'
+    });
+    assert.equal(deleteRes.command, 'deleteUserDetails');
+    assert.deepEqual(deleteRes.errors, [null, null]);
+
+    // user.name and user.email should no longer be in local config
+    const localConfig = cp.execFileSync('git', ['config', '--local', '--list'], { cwd: repoPath }).toString();
+    assert.ok(!localConfig.includes('user.name='));
+    assert.ok(!localConfig.includes('user.email='));
+
+    // 3. Deleting already-unset user details should succeed without errors (exit code 5 tolerated)
+    const deleteAgainRes: any = await worker.request('msg', {
+      command: 'deleteUserDetails',
+      repo: repoPath,
+      name: true,
+      email: true,
+      location: 'local'
+    });
+    assert.equal(deleteAgainRes.command, 'deleteUserDetails');
+    assert.deepEqual(deleteAgainRes.errors, [null, null]);
+
+    // 4. deleteUserDetails with neither name nor email returns [null] so frontend reloads config
+    const deleteNoneRes: any = await worker.request('msg', {
+      command: 'deleteUserDetails',
+      repo: repoPath,
+      name: false,
+      email: false,
+      location: 'local'
+    });
+    assert.equal(deleteNoneRes.command, 'deleteUserDetails');
+    assert.deepEqual(deleteNoneRes.errors, [null]);
+
+    // 5. editUserDetails with deleteLocal when local config does not exist
+    const editWithDeleteLocalRes: any = await worker.request('msg', {
+      command: 'editUserDetails',
+      repo: repoPath,
+      name: 'Global User',
+      email: 'global@example.com',
+      location: 'local',
+      deleteLocalName: true,
+      deleteLocalEmail: true
+    });
+    assert.equal(editWithDeleteLocalRes.command, 'editUserDetails');
+    assert.deepEqual(editWithDeleteLocalRes.errors, [null, null, null, null]);
+
+    await worker.deactivate();
+  } finally {
+    cleanup();
+  }
+});
+
+test('getStashes returns selector formatted as stash@{0}', async () => {
+  const { repoPath, cleanup } = initTestRepo();
+  try {
+    fs.writeFileSync(path.join(repoPath, 'initial.txt'), 'stash test\n');
+    cp.execFileSync('git', ['stash', 'push', '-m', 'test stash message'], { cwd: repoPath });
+
+    const ds = new DataSource();
+    const stashes = await ds.getStashes(repoPath);
+    assert.equal(stashes.length, 1);
+    assert.equal(stashes[0].selector, 'stash@{0}');
+    assert.ok(!stashes[0].selector.startsWith('refs/'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('preserves and restores repoState via setRepoState and across reloads', async () => {
+  const { repoPath, cleanup } = initTestRepo();
+  try {
+    const host = mockHost({
+      capabilities: ['workspace:read', 'workspace:write', 'storage:own', 'notifications:show'],
+      results: {
+        'workspace.list': {
+          workspaces: [{ id: 'ws-1', kind: 'worktree', name: 'test-repo', path: repoPath, branch: 'main', hostId: null }],
+          truncated: false
+        },
+        'workspace.readContext': { branch: 'main', displayName: 'test-repo', terminals: [] }
+      }
+    });
+
+    const worker = await mountWorker(main, { host });
+
+    // Initial state has default repo state
+    let state: any = await worker.request('getInitialState');
+    const repoKey = state.initialState.lastActiveRepo;
+    assert.ok(repoKey);
+    assert.equal(state.initialState.repos[repoKey].cdvDivider, 0.5);
+
+    // Set custom repo state and workspace view state
+    const setRepoRes: any = await worker.request('msg', {
+      command: 'setRepoState',
+      repo: repoKey,
+      state: {
+        cdvDivider: 0.8,
+        cdvHeight: 320,
+        columnWidths: [120, 240, 180, 80],
+        showStashes: 1
+      }
+    });
+    assert.equal(setRepoRes.command, 'setRepoState');
+    assert.equal(setRepoRes.error, null);
+
+    const setWorkspaceRes: any = await worker.request('msg', {
+      command: 'setWorkspaceViewState',
+      state: {
+        findIsCaseSensitive: true,
+        findIsRegex: true
+      }
+    });
+    assert.equal(setWorkspaceRes.command, 'setWorkspaceViewState');
+
+    // loadRepos should reflect updated repo state
+    const loadReposRes: any = await worker.request('msg', {
+      command: 'loadRepos'
+    });
+    assert.equal(loadReposRes.repos[repoKey].cdvDivider, 0.8);
+    assert.equal(loadReposRes.repos[repoKey].cdvHeight, 320);
+    assert.deepEqual(loadReposRes.repos[repoKey].columnWidths, [120, 240, 180, 80]);
+    assert.equal(loadReposRes.repos[repoKey].showStashes, 1);
+
+    // getInitialState should also reflect updated repo state
+    state = await worker.request('getInitialState');
+    assert.equal(state.initialState.repos[repoKey].cdvDivider, 0.8);
+    assert.equal(state.initialState.repos[repoKey].cdvHeight, 320);
+
+    await worker.deactivate();
+
+    // Verify storage persistence across a fresh worker mount on the same host
+    const worker2 = await mountWorker(main, { host });
+    const state2: any = await worker2.request('getInitialState');
+    assert.equal(state2.initialState.repos[repoKey].cdvDivider, 0.8);
+    assert.equal(state2.initialState.repos[repoKey].cdvHeight, 320);
+    assert.deepEqual(state2.initialState.repos[repoKey].columnWidths, [120, 240, 180, 80]);
+    assert.equal(state2.workspaceState.findIsCaseSensitive, true);
+    assert.equal(state2.workspaceState.findIsRegex, true);
+
+    await worker2.deactivate();
+  } finally {
+    cleanup();
+  }
 });

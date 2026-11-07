@@ -61,9 +61,16 @@ export interface GitCommitDetails {
   fileChanges: GitFileChange[];
 }
 
+const GIT_ENV = {
+  ...process.env,
+  LC_ALL: 'en_US.UTF-8',
+  LANG: 'en_US.UTF-8',
+  LANGUAGE: 'en_US.UTF-8'
+};
+
 export function execGit(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    cp.execFile('git', args, { cwd, maxBuffer: 30 * 1024 * 1024 }, (err, stdout, stderr) => {
+    cp.execFile('git', args, { cwd, env: GIT_ENV, maxBuffer: 30 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         reject(stderr || stdout || err.message);
       } else {
@@ -86,7 +93,7 @@ export class DataSource {
       '%G?', '%GS', '%GK',
       '%B'
     ].join(GIT_LOG_SEPARATOR);
-    this.gitFormatStash = ['%H', '%P', '%gD', '%an', '%ae', '%at', '%s'].join(GIT_LOG_SEPARATOR);
+    this.gitFormatStash = ['%H', '%P', '%gd', '%an', '%ae', '%at', '%s'].join(GIT_LOG_SEPARATOR);
   }
 
   async repoRoot(p: string): Promise<string | null> {
@@ -703,8 +710,8 @@ export class DataSource {
           pushDefault: consolidated['remote.pushdefault'] || null,
           remotes: remotes.map(remote => ({
             name: remote,
-            url: local['remote.' + remote + '.url'] || null,
-            pushUrl: local['remote.' + remote + '.pushurl'] || null
+            url: consolidated['remote.' + remote + '.url'] || local['remote.' + remote + '.url'] || null,
+            pushUrl: consolidated['remote.' + remote + '.pushurl'] || local['remote.' + remote + '.pushurl'] || null
           })),
           user: {
             name: {
@@ -774,7 +781,7 @@ export class DataSource {
 
   async runGitCommand(args: string[], repo: string): Promise<string | null> {
     return new Promise((resolve) => {
-      cp.execFile('git', args, { cwd: repo, maxBuffer: 30 * 1024 * 1024 }, (err, stdout, stderr) => {
+      cp.execFile('git', args, { cwd: repo, env: GIT_ENV, maxBuffer: 30 * 1024 * 1024 }, (err, stdout, stderr) => {
         if (err) {
           const out = (stderr || stdout || err.message || '').toString().trim();
           resolve(out || 'Git command failed');
@@ -787,11 +794,33 @@ export class DataSource {
 
   async areStagedChanges(repo: string): Promise<boolean> {
     try {
-      const stdout = await execGit(['diff-index', 'HEAD'], repo);
+      const stdout = await execGit(['diff-index', '--cached', 'HEAD'], repo);
       return stdout.trim() !== '';
     } catch {
-      return false;
+      try {
+        const stdout = await execGit(['diff', '--cached', '--name-only'], repo);
+        return stdout.trim() !== '';
+      } catch {
+        return false;
+      }
     }
+  }
+
+  async unsetGitConfig(repo: string, location: 'global' | 'local', key: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      cp.execFile('git', ['config', '--' + location, '--unset', key], { cwd: repo, env: GIT_ENV }, (err, stdout, stderr) => {
+        if (err) {
+          if ((err as any).code === 5 || (err as any).status === 5) {
+            resolve(null);
+            return;
+          }
+          const out = (stderr || stdout || err.message || '').toString().trim();
+          resolve(out || 'Git config unset failed');
+        } else {
+          resolve(null);
+        }
+      });
+    });
   }
 
   async commitSquashIfStagedChangesExist(
@@ -1189,8 +1218,97 @@ export class DataSource {
     return this.runGitCommand(['remote', 'remove', name], repo);
   }
 
+  async editRemote(
+    repo: string,
+    nameOld: string,
+    nameNew: string,
+    urlOld: string | null,
+    urlNew: string | null,
+    pushUrlOld: string | null,
+    pushUrlNew: string | null
+  ): Promise<string | null> {
+    const valNew = validateRefName(nameNew, 'Remote');
+    if (valNew) return valNew;
+    if (!nameOld || typeof nameOld !== 'string' || nameOld.trim() === '') {
+      return 'Remote name cannot be empty';
+    }
+
+    if (nameOld !== nameNew) {
+      const renameStatus = await this.runGitCommand(['remote', 'rename', nameOld, nameNew], repo);
+      if (renameStatus !== null) return renameStatus;
+    }
+
+    if (urlOld !== urlNew) {
+      if (urlNew !== null) {
+        const status = await this.runGitCommand(['remote', 'set-url', nameNew, urlNew], repo);
+        if (status !== null) return status;
+      } else if (urlOld !== null) {
+        const status = await this.runGitCommand(['remote', 'set-url', '--delete', nameNew, urlOld], repo);
+        if (status !== null) return status;
+      }
+    }
+
+    if (pushUrlOld !== pushUrlNew) {
+      if (pushUrlOld === null && pushUrlNew !== null) {
+        const status = await this.runGitCommand(['remote', 'set-url', '--push', '--add', nameNew, pushUrlNew], repo);
+        if (status !== null) return status;
+      } else if (pushUrlOld !== null && pushUrlNew !== null) {
+        const status = await this.runGitCommand(['remote', 'set-url', '--push', nameNew, pushUrlNew], repo);
+        if (status !== null) return status;
+      } else if (pushUrlOld !== null && pushUrlNew === null) {
+        let status = await this.runGitCommand(['remote', 'set-url', '--push', '--delete', nameNew, pushUrlOld], repo);
+        if (status !== null) {
+          status = await this.runGitCommand(['config', '--unset-all', `remote.${nameNew}.pushurl`], repo);
+        }
+        if (status !== null) return status;
+      }
+    }
+
+    return null;
+  }
+
   async pruneRemote(repo: string, name: string): Promise<string | null> {
     return this.runGitCommand(['remote', 'prune', name], repo);
+  }
+
+  // User details
+  async editUserDetails(
+    repo: string,
+    name: string,
+    email: string,
+    location: 'global' | 'local',
+    deleteLocalName: boolean,
+    deleteLocalEmail: boolean
+  ): Promise<(string | null)[]> {
+    const errors: (string | null)[] = [];
+    errors.push(await this.runGitCommand(['config', '--' + location, 'user.name', name], repo));
+    errors.push(await this.runGitCommand(['config', '--' + location, 'user.email', email], repo));
+    if (deleteLocalName) {
+      errors.push(await this.unsetGitConfig(repo, 'local', 'user.name'));
+    }
+    if (deleteLocalEmail) {
+      errors.push(await this.unsetGitConfig(repo, 'local', 'user.email'));
+    }
+    return errors;
+  }
+
+  async deleteUserDetails(
+    repo: string,
+    name: boolean,
+    email: boolean,
+    location: 'global' | 'local'
+  ): Promise<(string | null)[]> {
+    const errors: (string | null)[] = [];
+    if (name) {
+      errors.push(await this.unsetGitConfig(repo, location, 'user.name'));
+    }
+    if (email) {
+      errors.push(await this.unsetGitConfig(repo, location, 'user.email'));
+    }
+    if (errors.length === 0) {
+      errors.push(null);
+    }
+    return errors;
   }
 }
 

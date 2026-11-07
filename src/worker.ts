@@ -137,12 +137,34 @@ export async function getActiveRepo(orca: OrcaWorkerApi, dataSource: DataSource 
   return null;
 }
 
+export async function loadStoredRepoStates(orca: OrcaWorkerApi): Promise<Record<string, any>> {
+  try {
+    if (orca.storage?.get) {
+      const val = await orca.storage.get('repoStates');
+      if (val && typeof val === 'object') {
+        return val as Record<string, any>;
+      }
+    }
+  } catch {}
+  return {};
+}
+
+export async function saveStoredRepoStates(orca: OrcaWorkerApi, states: Record<string, any>): Promise<void> {
+  try {
+    if (orca.storage?.set) {
+      await orca.storage.set('repoStates', states);
+    }
+  } catch {}
+}
+
 export async function getReposState(
   orca: OrcaWorkerApi,
-  dataSource: DataSource = new DataSource()
+  dataSource: DataSource = new DataSource(),
+  savedStates?: Record<string, any>
 ): Promise<{ activeRepo: string | null; repos: Record<string, typeof DEFAULT_REPO_STATE> }> {
   const activeRepo = await getActiveRepo(orca, dataSource);
   const repos: Record<string, typeof DEFAULT_REPO_STATE> = {};
+  const saved = savedStates ?? (await loadStoredRepoStates(orca));
 
   try {
     const list = await orca.host.call('workspace.list');
@@ -151,14 +173,14 @@ export async function getReposState(
       if (w?.path && (w.kind === 'worktree' || !w.kind)) {
         const root = await dataSource.repoRoot(w.path);
         if (root && !repos[root]) {
-          repos[root] = { ...DEFAULT_REPO_STATE };
+          repos[root] = { ...DEFAULT_REPO_STATE, ...(saved[root] || {}) };
         }
       }
     }
   } catch {}
 
   if (activeRepo && !repos[activeRepo]) {
-    repos[activeRepo] = { ...DEFAULT_REPO_STATE };
+    repos[activeRepo] = { ...DEFAULT_REPO_STATE, ...(saved[activeRepo] || {}) };
   }
 
   return { activeRepo, repos };
@@ -166,6 +188,16 @@ export async function getReposState(
 
 export default function activate(orca: OrcaWorkerApi): void {
   const dataSource = new DataSource();
+  const storedRepoStates: Record<string, any> = {};
+  let storedStatesLoaded = false;
+
+  async function ensureStoredStates(): Promise<void> {
+    if (!storedStatesLoaded) {
+      const loaded = await loadStoredRepoStates(orca);
+      Object.assign(storedRepoStates, loaded);
+      storedStatesLoaded = true;
+    }
+  }
 
   let globalViewState = {
     alwaysAcceptCheckoutCommit: false,
@@ -179,7 +211,22 @@ export default function activate(orca: OrcaWorkerApi): void {
   };
 
   orca.panels.handle('getInitialState', async () => {
-    const { activeRepo, repos } = await getReposState(orca, dataSource);
+    await ensureStoredStates();
+    if (orca.storage?.get) {
+      try {
+        const savedGlobal = await orca.storage.get('globalViewState');
+        if (savedGlobal && typeof savedGlobal === 'object') {
+          globalViewState = { ...globalViewState, ...savedGlobal };
+        }
+      } catch {}
+      try {
+        const savedWorkspace = await orca.storage.get('workspaceViewState');
+        if (savedWorkspace && typeof savedWorkspace === 'object') {
+          workspaceViewState = { ...workspaceViewState, ...savedWorkspace };
+        }
+      } catch {}
+    }
+    const { activeRepo, repos } = await getReposState(orca, dataSource, storedRepoStates);
     if (!activeRepo) {
       return {
         error: '当前 workspace 不是 Git 仓库',
@@ -300,7 +347,8 @@ export default function activate(orca: OrcaWorkerApi): void {
 
       case 'loadRepos':
       case 'rescanForRepos': {
-        const { activeRepo, repos } = await getReposState(orca, dataSource);
+        await ensureStoredStates();
+        const { activeRepo, repos } = await getReposState(orca, dataSource, storedRepoStates);
         reply = {
           command: 'loadRepos',
           repos,
@@ -374,6 +422,14 @@ export default function activate(orca: OrcaWorkerApi): void {
       }
 
       case 'setRepoState': {
+        if (msg.repo && msg.state && typeof msg.state === 'object') {
+          await ensureStoredStates();
+          storedRepoStates[msg.repo] = {
+            ...(storedRepoStates[msg.repo] || DEFAULT_REPO_STATE),
+            ...msg.state
+          };
+          await saveStoredRepoStates(orca, storedRepoStates);
+        }
         reply = {
           command: msg.command,
           error: null
@@ -384,6 +440,9 @@ export default function activate(orca: OrcaWorkerApi): void {
       case 'setGlobalViewState': {
         if (msg.state) {
           globalViewState = { ...globalViewState, ...msg.state };
+          if (orca.storage?.set) {
+            await orca.storage.set('globalViewState', globalViewState).catch(() => {});
+          }
         }
         reply = {
           command: msg.command,
@@ -395,6 +454,9 @@ export default function activate(orca: OrcaWorkerApi): void {
       case 'setWorkspaceViewState': {
         if (msg.state) {
           workspaceViewState = { ...workspaceViewState, ...msg.state };
+          if (orca.storage?.set) {
+            await orca.storage.set('workspaceViewState', workspaceViewState).catch(() => {});
+          }
         }
         reply = {
           command: msg.command,
@@ -766,6 +828,23 @@ export default function activate(orca: OrcaWorkerApi): void {
         break;
       }
 
+      case 'editRemote': {
+        const error = await dataSource.editRemote(
+          msg.repo,
+          msg.nameOld,
+          msg.nameNew,
+          msg.urlOld ?? null,
+          msg.urlNew ?? null,
+          msg.pushUrlOld ?? null,
+          msg.pushUrlNew ?? null
+        );
+        reply = {
+          command: 'editRemote',
+          error
+        };
+        break;
+      }
+
       case 'deleteRemote': {
         const error = await dataSource.deleteRemote(msg.repo, msg.name);
         reply = {
@@ -784,11 +863,34 @@ export default function activate(orca: OrcaWorkerApi): void {
         break;
       }
 
-      case 'deleteUserDetails':
       case 'editUserDetails': {
+        const location = msg.location === 'global' ? 'global' : 'local';
+        const errors = await dataSource.editUserDetails(
+          msg.repo,
+          msg.name,
+          msg.email,
+          location,
+          !!msg.deleteLocalName,
+          !!msg.deleteLocalEmail
+        );
         reply = {
-          command: msg.command,
-          errors: []
+          command: 'editUserDetails',
+          errors
+        };
+        break;
+      }
+
+      case 'deleteUserDetails': {
+        const location = msg.location === 'global' ? 'global' : 'local';
+        const errors = await dataSource.deleteUserDetails(
+          msg.repo,
+          !!msg.name,
+          !!msg.email,
+          location
+        );
+        reply = {
+          command: 'deleteUserDetails',
+          errors
         };
         break;
       }
@@ -821,7 +923,8 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.events.on('workspace.changed', async () => {
     try {
-      const { activeRepo, repos } = await getReposState(orca, dataSource);
+      await ensureStoredStates();
+      const { activeRepo, repos } = await getReposState(orca, dataSource, storedRepoStates);
       if (activeRepo) {
         orca.panels.post('msg', {
           command: 'loadRepos',
